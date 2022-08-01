@@ -24,6 +24,7 @@ pub mod pallet {
 		}
 	};
 
+
 	/// Configure the pallet by specifying the parameters and types on which it depends.
 	#[pallet::config]
 	pub trait Config: frame_system::Config {
@@ -31,22 +32,35 @@ pub mod pallet {
 		type Event: From<Event<Self>> + IsType<<Self as frame_system::Config>::Event>;
 	}
 
+
 	#[pallet::pallet]
 	#[pallet::generate_store(pub(super) trait Store)]
 	pub struct Pallet<T>(_);
 
+
 	// The pallet's runtime storage items.
 	// https://docs.substrate.io/v3/runtime/storage
 	#[pallet::storage]
-	#[pallet::getter(fn something)]
+	#[pallet::getter(fn attestations)]
 	// Learn more about declaring storage items:
 	// https://docs.substrate.io/v3/runtime/storage#declaring-storage-items
 	// Attestations is a double storage map holding
 	pub type Attestations<T: Config> = StorageDoubleMap<_, Blake2_128Concat, 
 		T::AccountId, Blake2_128Concat, T::AccountId, (u8, T::BlockNumber)>;
 
-	// Todo: add a counted storage map with accountid as key and (count of 
-	// attestations, sum confidence) as values
+
+	#[pallet::storage]
+	#[pallet::getter(fn account_data)]
+	// All accounts' data (# attestations, sum of confidence, birth block).
+	pub type AccountData<T: Config> = CountedStorageMap<_, Blake2_128Concat, 
+		T::AccountId, (u32, u32, T::BlockNumber)>;
+
+
+	#[pallet::storage]
+	#[pallet::getter(fn attest_count)]
+	// All accounts' data (# attestations, sum of confidence, birth block).
+	pub type AttestationCount<T: Config> = StorageValue<_, u32>;
+
 
 	// Pallets use events to inform users when important changes are made.
 	// https://docs.substrate.io/v3/runtime/events-and-errors
@@ -56,15 +70,25 @@ pub mod pallet {
 		/// Event documentation should end with an array that provides descriptive names for event
 		/// parameters. [something, who]
 		Attested(T::AccountId, T::AccountId, (u8, T::BlockNumber)),
+		TotalCount(u32),
 	}
+
 
 	// Errors inform users that something went wrong.
 	#[pallet::error]
 	pub enum Error<T> {
+		/// The chosen confidence value is not within valid bounds: 0..10 (inclusive).
 		ConfidenceOutOfBounds, 
+		/// An account may not attest to themselves.
 		SelfAttestationError,
-
+		/// The party trying to attest has not been attested for.
+		UnknownAttester,
+		/// Account must have >= network average attest count to attest
+		InsufficientAttestCount,
+		/// Account must have >= average confindence on network to attest
+		InsufficientConfidence,
 	}
+
 
 	//#[pallet::hooks]
 	//impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
@@ -72,6 +96,8 @@ pub mod pallet {
 		//fn on_initialize(n: T::BlockNumber) -> Weight {
 		//}
 	//}
+
+
 
 	// Dispatchable functions allows users to interact with the pallet and invoke state changes.
 	// These functions materialize as "extrinsics", which are often compared to transactions.
@@ -103,17 +129,73 @@ pub mod pallet {
 			let dest = T::Lookup::lookup(target)?;
 			// Ensure that origin and dest are not the same account.
 			ensure!(origin.clone() != dest.clone(), Error::<T>::SelfAttestationError);
-			// Clone for event.
-			let o = origin.clone();
-			let d = dest.clone();
-
+			
 			let current_block = <frame_system::Pallet<T>>::block_number();
 
-			// Update storage.
-			<Attestations<T>>::insert(dest, origin, (confidence, current_block));
+			// Find get latest attest count, initialize if empty
+			let latest_attest_count = match <AttestationCount<T>>::try_get() {
+				Ok(value) => value,
+				Err(_) => {
+					<AttestationCount<T>>::put(0);
+					0
+				}
+			};
 
+
+			// Deconstruct the origin's Account Data for validity checks.
+			let (origin_attest_count, origin_sum_confidence, origin_birth_block) = 
+				match <AccountData<T>>::try_get(origin.clone()) {
+					Ok(data) => data,
+					Err(_) => return Err(Error::<T>::UnknownAttester.into()),
+				};
+
+			// Ensure # attestations for origin >= the average for the network
+			
+			ensure!(
+				origin_attest_count >= latest_attest_count / <AccountData<T>>::count(), 
+				Error::<T>::InsufficientAttestCount);
+
+			// Ensure avg confidence >= the average of the network
+
+			// Update storage (Attestations and Account Data).
+			
+			if <Attestations<T>>::contains_key(dest.clone(), origin.clone()) { // if attestations contains the key pair already it means we're chanching values of an existing attestation
+
+				let confidence_diff = confidence - <Attestations<T>>::get(dest.clone(), origin.clone()).unwrap().0; // calculate the difference between new and old confidence values to update AccountData
+
+				let (og_count, og_confidence, birth_block) = <AccountData<T>>::get(dest.clone()).unwrap(); // deconstruct latest AccountData for reference
+
+				// Update account data.
+				<AccountData<T>>::insert(dest.clone(), (
+					og_count, // do not increment because key pair already exists  
+					og_confidence + confidence_diff as u32, // add the diff
+					birth_block)); // leave birth block unchainged 
+
+			} else { // if the key pair doesn't exist yet, this is a new attestation
+
+				// Increment the total attest count.	
+				<AttestationCount<T>>::put(latest_attest_count + 1);
+
+				if <AccountData<T>>::contains_key(dest.clone()) { // account 
+
+					let (og_count, og_confidence, birth_block) = <AccountData<T>>::get(dest.clone()).unwrap(); // deconstruct latest AccountData for reference
+						
+					// Update account data.
+					<AccountData<T>>::insert(dest.clone(), (
+						og_count + 1, // key pair did not exist so add new attestation to the original count 
+						og_confidence + confidence as u32, // add confidence for new attestation to the original sum
+						birth_block)); // leave birth block because the account is not new
+
+				} else { // if the account is new initialize all AccountData
+					<AccountData<T>>::insert(dest.clone(), (1, confidence as u32, current_block))
+				}
+			}
+			// Update Attestations.
+			<Attestations<T>>::insert(dest.clone(), origin.clone(), (confidence, current_block));
+			
+			
 			// Emit an event.
-			Self::deposit_event(Event::Attested(o, d, (confidence, current_block)));
+			Self::deposit_event(Event::Attested(origin, dest, (confidence, current_block)));
 			// Return a successful DispatchResultWithPostInfo
 			Ok(())
 		}
@@ -121,6 +203,7 @@ pub mod pallet {
 
 	// Helper functions.
 	impl<T: Config> Pallet<T> {
+
 		// Counts the number of attestations for a given account.
 
 		// Sums the confidence for a given account
