@@ -24,12 +24,22 @@ pub mod pallet {
 		}
 	};
 
+	/// Value an account attaches to their attestation representing their 
+	/// confidence in the target account's validity
+	type Confidence = u8;
+
+	/// A count of attestations
+	type AttestCount = u32;
+
+	/// A sum of confidence values
+	type ConfidenceSum = u32;
 
 	/// Configure the pallet by specifying the parameters and types on which it depends.
 	#[pallet::config]
 	pub trait Config: frame_system::Config {
 		/// Because this pallet emits events, it depends on the runtime's definition of an event.
 		type Event: From<Event<Self>> + IsType<<Self as frame_system::Config>::Event>;
+		// consider adding MAX and MIN confidence values to change in runtime w votes
 	}
 
 
@@ -46,14 +56,14 @@ pub mod pallet {
 	// https://docs.substrate.io/v3/runtime/storage#declaring-storage-items
 	// Attestations is a double storage map holding
 	pub type Attestations<T: Config> = StorageDoubleMap<_, Blake2_128Concat, 
-		T::AccountId, Blake2_128Concat, T::AccountId, (u8, T::BlockNumber)>;
+		T::AccountId, Blake2_128Concat, T::AccountId, (Confidence, T::BlockNumber)>;
 
 
 	#[pallet::storage]
 	#[pallet::getter(fn account_data)]
 	// All accounts' data (# attestations, sum of confidence, birth block).
 	pub type AccountData<T: Config> = CountedStorageMap<_, Blake2_128Concat, 
-		T::AccountId, (u32, u32, T::BlockNumber)>;
+		T::AccountId, (AttestCount, ConfidenceSum, T::BlockNumber)>;
 
 
 	#[pallet::storage]
@@ -69,8 +79,7 @@ pub mod pallet {
 	pub enum Event<T: Config> {
 		/// Event documentation should end with an array that provides descriptive names for event
 		/// parameters. [something, who]
-		Attested(T::AccountId, T::AccountId, (u8, T::BlockNumber)),
-		TotalCount(u32),
+		Attested(T::AccountId, T::AccountId, (Confidence, T::BlockNumber)),
 	}
 
 
@@ -120,7 +129,7 @@ pub mod pallet {
 		pub fn attest(
 			origin: OriginFor<T>,
 			target: <T::Lookup as StaticLookup>::Source,
-			confidence: u8,
+			confidence: Confidence,
 		) -> DispatchResult {
 			// Ensure that confidence is within the valid range 0..10 (inclusive).
 			ensure!(confidence <= 10, Error::<T>::ConfidenceOutOfBounds);
@@ -143,19 +152,23 @@ pub mod pallet {
 
 
 			// Deconstruct the origin's Account Data for validity checks.
-			let (origin_attest_count, origin_sum_confidence, origin_birth_block) = 
+			let (origin_attest_count, _origin_sum_confidence, _origin_birth_block) = 
 				match <AccountData<T>>::try_get(origin.clone()) {
 					Ok(data) => data,
-					Err(_) => return Err(Error::<T>::UnknownAttester.into()),
+					Err(_) => ({
+						<AccountData<T>>::insert(origin.clone(), (0, 0, current_block)); // add attester to AccountData if they dont exist yet
+						(0, 0, current_block) 
+					}),		
 				};
 
 			// Ensure # attestations for origin >= the average for the network
-			
 			ensure!(
 				origin_attest_count >= latest_attest_count / <AccountData<T>>::count(), 
 				Error::<T>::InsufficientAttestCount);
 
-			// Ensure avg confidence >= the average of the network
+			// Todo: Ensure avg confidence >= the average of the network
+			
+
 
 			// Update storage (Attestations and Account Data).
 			
