@@ -35,6 +35,10 @@ pub mod pallet {
 	/// A sum of confidence values
 	type ConfidenceSum = u32;
 
+	/// Voter's decision on a challenge: -10..10 (inclusive) 
+	/// Greater numbers indicate greater suspicion 
+	type Vote = i8;
+
 
 	/// Configure the pallet by specifying the parameters and types on which it depends.
 	#[pallet::config]
@@ -42,6 +46,17 @@ pub mod pallet {
 		/// Because this pallet emits events, it depends on the runtime's definition of an event.
 		type Event: From<Event<Self>> + IsType<<Self as frame_system::Config>::Event>;
 		// consider adding MAX confidence value to change in runtime w votes
+		
+		#[pallet::constant]
+		/// Number of blocks the each challenge stays active
+		type ChallengeDuration: Get<u32>;
+
+		// Mayber add minimum stake for challenge and vote 
+
+		#[pallet::constant]
+		/// Maximum number of challenges that can be active at once
+		type MaxChallenges: Get<u32>;
+
 	}
 
 
@@ -50,28 +65,41 @@ pub mod pallet {
 	pub struct Pallet<T>(_);
 
 
-	// The pallet's runtime storage items.
-	// https://docs.substrate.io/v3/runtime/storage
+	// Attestation storage types:
 	#[pallet::storage]
 	#[pallet::getter(fn attestations)]
-	// Learn more about declaring storage items:
-	// https://docs.substrate.io/v3/runtime/storage#declaring-storage-items
-	// Attestations is a double storage map holding
+	/// Attestations is a double storage map holding
 	pub type Attestations<T: Config> = StorageDoubleMap<_, Blake2_128Concat, 
 		T::AccountId, Blake2_128Concat, T::AccountId, (Confidence, T::BlockNumber)>;
 
-
 	#[pallet::storage]
 	#[pallet::getter(fn account_data)]
-	// All accounts' data (# attestations, sum of confidence, birth block).
+	/// All accounts' data (# attestations, sum of confidence, birth block).
 	pub type AccountData<T: Config> = CountedStorageMap<_, Blake2_128Concat, 
 		T::AccountId, (AttestCount, ConfidenceSum, T::BlockNumber)>;
 
-
 	#[pallet::storage]
 	#[pallet::getter(fn attest_count)]
-	// All accounts' data (# attestations, sum of confidence, birth block).
+	/// All accounts' data (# attestations, sum of confidence, birth block).
 	pub type AttestationCount<T: Config> = StorageValue<_, u32>;
+
+
+	// Challenge Storage types:
+	#[pallet::storage]
+	#[pallet::getter(fn challenges)]
+	/// A bounded vec containing all active challenges. Each challenge is 
+	/// represented by a tuple containing the suspect's account ID and the 
+	/// final block.
+	pub type Challenges<T: Config> = StorageValue<_,
+		BoundedVec<(T::AccountId, T::BlockNumber), T::MaxChallenges>, ValueQuery>;
+
+	#[pallet::storage]
+	#[pallet::getter(fn votes)]
+	/// A double storage map containing the suspect's ID as key1, the voter
+	/// ID as key2, and the vote value 
+	pub type Votes<T: Config> = StorageMap<_, Blake2_128Concat, T::AccountId, Vote>;
+	
+
 
 
 	// Pallets use events to inform users when important changes are made.
@@ -82,6 +110,8 @@ pub mod pallet {
 		/// Event documentation should end with an array that provides descriptive names for event
 		/// parameters. [something, who]
 		Attested(T::AccountId, T::AccountId, (Confidence, T::BlockNumber)),
+		/// A challence was issued! (Challenger, Suspect, FinalBlock)
+		ChallengeCreated(T::AccountId, T::AccountId, T::BlockNumber),
 	}
 
 
@@ -98,15 +128,24 @@ pub mod pallet {
 		InsufficientAttestCount,
 		/// Account must have >= average confindence on network to attest
 		InsufficientConfidence,
+
+		/// Vote must be within -10..10 (inclusive)
+		VoteOutOfBounds,
+		/// The account does not meet network requirements to submit a challenge.
+		InvalidChallenger,
+		/// The maximum permissible number of challenges has been reached.
+		MaxChallengesReached,
+		
 	}
 
 
-	//#[pallet::hooks]
-	//impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
-		/// Weight: see `begin_block`
-		//fn on_initialize(n: T::BlockNumber) -> Weight {
-		//}
-	//}
+	#[pallet::hooks]
+	impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+		//Weight: see `begin_block`
+		fn on_initialize(n: T::BlockNumber) -> Weight {
+			Self::begin_block(n)
+		}
+	}
 
 
 
@@ -126,7 +165,6 @@ pub mod pallet {
 		/// Todo: Attestations only valid if the origin has >= the average #
 		/// attestations for the network and >= the average confidence for the
 		/// network
-		/// Todo: 
 		#[pallet::weight(10_000 + T::DbWeight::get().writes(1))]
 		pub fn attest(
 			origin: OriginFor<T>,
@@ -143,7 +181,7 @@ pub mod pallet {
 			
 			let current_block = <frame_system::Pallet<T>>::block_number();
 
-			// Find get latest attest count, initialize if empty
+			// Get latest attest count, initialize if empty
 			let total_attest_count = match <AttestationCount<T>>::try_get() {
 				Ok(value) => value,
 				Err(_) => {
@@ -169,6 +207,7 @@ pub mod pallet {
 				Error::<T>::InsufficientAttestCount);
 
 			// Todo: Ensure avg confidence >= the average of the network
+			// Todo: Ensure the account has existed long enough
 			
 
 
@@ -214,22 +253,100 @@ pub mod pallet {
 			// Return a successful DispatchResultWithPostInfo
 			Ok(())
 		}
+
+
+		#[pallet::weight(10_000 + T::DbWeight::get().writes(1))]
+		/// Begin a challenge on another account's validity. Every account will
+		/// get opportunity to cast a vote to decide whether to keep or ban the
+		/// suspect 
+		pub fn challenge(
+			challenger: OriginFor<T>,
+			suspect: <T::Lookup as StaticLookup>::Source,
+		) -> DispatchResult {
+
+			let challenger = ensure_signed(challenger)?;
+			let suspect = T::Lookup::lookup(suspect)?;
+
+			// Check challenger validity
+			ensure!(Self::check_account_validity(challenger.clone()), Error::<T>::InvalidChallenger);
+
+			// Calculate final block
+			let current_block = <frame_system::Pallet<T>>::block_number();
+			let final_block = current_block + T::ChallengeDuration::get().into();
+
+			// Add challenge to challenges
+			let mut challenges = <Challenges<T>>::get();
+			match challenges.try_insert(0,(suspect.clone(), final_block)) {
+				Ok(_) => (),
+				Err(_) => return Err(Error::<T>::MaxChallengesReached.into())
+			};
+			<Challenges<T>>::put(challenges);
+
+			// Emit an event.
+			Self::deposit_event(Event::ChallengeCreated(challenger, suspect, final_block));
+			// Return a successful DispatchResultWithPostInfo
+			Ok(())
+		}
+
+
+		#[pallet::weight(10_000 + T::DbWeight::get().writes(1))]
+		/// Vote
+		pub fn vote(origin: OriginFor<T>, suspect: T::AccountId, value: Vote) -> DispatchResult{
+			todo!();
+			let origin = ensure_signed(origin)?;
+			// Check value validity.
+			// Check voter validity.
+			// Add vote to storage.
+
+			// Emit an event.
+		}
 	}
 
 	// Helper functions.
 	impl<T: Config> Pallet<T> {
 
-		// Counts the number of attestations for a given account.
+		/// Initializes a block by processing and removing completed challenges. 
+		fn begin_block(block_number: T::BlockNumber) -> Weight {
+			let current_block = <frame_system::Pallet<T>>::block_number();
+			let mut challenges = <Challenges<T>>::get();
 
-		// Sums the confidence for a given account
+			let mut i: usize = 0;
+			let (mut suspect, mut block) = match challenges.pop() {
+				Some(tup) => tup,
+				None => return T::BlockWeights::get().base_block,
+			};
+			while block >= current_block {
+				// Tally votes
+				// Enact final judgement
 
-		// Collects a list of attesters for a given account
+				// Prepare for next round
+				(suspect, block) = match challenges.pop() {
+					Some(tup) => tup,
+					None => return T::BlockWeights::get().base_block,
+				};
+				i += 1;
+			}
+			match challenges.try_push((suspect, block)) {
+				Ok(_) => (),
+				Err(_) => (), // This should theoretically never happen because we would have just removed a tuple 
+			};
+			<Challenges<T>>::put(challenges);
 
-		// Calculates the average confidence of every account on the network
+			T::BlockWeights::get().base_block
+		}
 
-		// Finds the earliest attestation for a given account
+		/// Checks whether Account is eligible to attest/vote/challenge
+		fn check_account_validity(account: T::AccountId) -> bool {
+			todo!();
+			// Avg confidence is above network average
+			// # attestations is above network average
+			// Account is not banned from the network 
+		}
 
-		// Counts all accounts attested for in double map
 
+		/// Tallies the votes from a challenge
+		fn tally(suspect: T::AccountId) -> u32{
+			todo!();
+		}
 	}
 }

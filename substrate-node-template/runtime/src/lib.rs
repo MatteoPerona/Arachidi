@@ -19,6 +19,7 @@ use sp_runtime::{
 	ApplyExtrinsicResult, MultiSignature,
 };
 use sp_std::prelude::*;
+
 #[cfg(feature = "std")]
 use sp_version::NativeVersion;
 use sp_version::RuntimeVersion;
@@ -262,9 +263,12 @@ impl pallet_sudo::Config for Runtime {
 	type Call = Call;
 }
 
+
 /// Configure the social_graph in pallets/social-graph.
 impl social_graph::Config for Runtime {
 	type Event = Event;
+	type ChallengeDuration = ConstU32<8>;
+	type MaxChallenges = ConstU32<1_000>;
 }
 
 // Create the runtime by composing the FRAME pallets that were previously configured.
