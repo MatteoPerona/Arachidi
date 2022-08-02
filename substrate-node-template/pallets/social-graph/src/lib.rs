@@ -24,6 +24,7 @@ pub mod pallet {
 		}
 	};
 
+
 	/// Value an account attaches to their attestation representing their 
 	/// confidence in the target account's validity
 	type Confidence = u8;
@@ -34,12 +35,13 @@ pub mod pallet {
 	/// A sum of confidence values
 	type ConfidenceSum = u32;
 
+
 	/// Configure the pallet by specifying the parameters and types on which it depends.
 	#[pallet::config]
 	pub trait Config: frame_system::Config {
 		/// Because this pallet emits events, it depends on the runtime's definition of an event.
 		type Event: From<Event<Self>> + IsType<<Self as frame_system::Config>::Event>;
-		// consider adding MAX and MIN confidence values to change in runtime w votes
+		// consider adding MAX confidence value to change in runtime w votes
 	}
 
 
@@ -142,7 +144,7 @@ pub mod pallet {
 			let current_block = <frame_system::Pallet<T>>::block_number();
 
 			// Find get latest attest count, initialize if empty
-			let latest_attest_count = match <AttestationCount<T>>::try_get() {
+			let total_attest_count = match <AttestationCount<T>>::try_get() {
 				Ok(value) => value,
 				Err(_) => {
 					<AttestationCount<T>>::put(0);
@@ -163,7 +165,7 @@ pub mod pallet {
 
 			// Ensure # attestations for origin >= the average for the network
 			ensure!(
-				origin_attest_count >= latest_attest_count / <AccountData<T>>::count(), 
+				origin_attest_count >= total_attest_count / <AccountData<T>>::count(), 
 				Error::<T>::InsufficientAttestCount);
 
 			// Todo: Ensure avg confidence >= the average of the network
@@ -187,7 +189,7 @@ pub mod pallet {
 			} else { // if the key pair doesn't exist yet, this is a new attestation
 
 				// Increment the total attest count.	
-				<AttestationCount<T>>::put(latest_attest_count + 1);
+				<AttestationCount<T>>::put(total_attest_count + 1);
 
 				if <AccountData<T>>::contains_key(dest.clone()) { // account 
 

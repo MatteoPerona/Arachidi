@@ -18,7 +18,7 @@ frame_support::construct_runtime!(
 		UncheckedExtrinsic = UncheckedExtrinsic,
 	{
 		System: frame_system::{Pallet, Call, Config, Storage, Event<T>},
-		SocialGraphModule: social_graph::{Pallet, Call, Storage, Event<T>},
+		SocialGraph: social_graph::{Pallet, Call, Storage, Event<T>},
 	}
 );
 
