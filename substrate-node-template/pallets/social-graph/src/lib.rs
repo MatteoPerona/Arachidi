@@ -383,8 +383,8 @@ pub mod pallet {
 			};
 
 			// Avg confidence is at least = network average
-			let avg_conf = tot_conf / tot_accounts;
-			if conf_sum >= avg_conf {return false};
+			let avg_conf_network = tot_conf / tot_attest;
+			if conf_sum / attest_count >= avg_conf_network {return false};
 		
 			// # attestations is at least = network average
 			let avg_attest = tot_attest / tot_accounts;
