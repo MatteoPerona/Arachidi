@@ -1,5 +1,5 @@
 use crate as social_graph;
-use frame_support::traits::{ConstU16, ConstU64};
+use frame_support::traits::{ConstU16, ConstU32, ConstU64};
 use frame_system as system;
 use sp_core::H256;
 use sp_runtime::{
@@ -51,6 +51,8 @@ impl system::Config for Test {
 
 impl social_graph::Config for Test {
 	type Event = Event;
+	type ChallengeDuration = ConstU32<8>;
+	type MaxChallenges = ConstU32<1_000>;
 }
 
 // Build genesis storage according to the mock runtime.
