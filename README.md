@@ -18,3 +18,4 @@ I also need to implement a system so that users cannot spam the network with cha
 
 # Considerations 
 The project is very unfinished. Tests do not currently run because I am still testing the voting system I made from scratch. 
+I am also still working on a front end network graph visualization based on: https://codesandbox.io/s/hc064?file=/src/Graph.js
