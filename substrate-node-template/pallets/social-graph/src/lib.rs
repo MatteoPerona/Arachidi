@@ -211,11 +211,8 @@ pub mod pallet {
 			};
 
 			// Ensure attester is valid
-			ensure!(
-				Self::check_account_validity(origin.clone()), 
-				Error::<T>::InvalidAttester);
+			ensure!(Self::check_account_validity(origin.clone()), Error::<T>::InvalidAttester);
 			
-
 
 			// Update storage (Attestations and Account Data).
 
@@ -387,11 +384,11 @@ pub mod pallet {
 
 			// Avg confidence is at least = network average
 			let avg_conf = tot_conf / tot_accounts;
-			if conf_sum <= avg_conf {return false};
+			if conf_sum >= avg_conf {return false};
 		
 			// # attestations is at least = network average
 			let avg_attest = tot_attest / tot_accounts;
-			if attest_count <= avg_attest {return false};
+			if attest_count >= avg_attest {return false};
 
 			// Average birth_block is at least = network average (to be added)
 			//let avg_bb = sum_bb / tot_accounts;
