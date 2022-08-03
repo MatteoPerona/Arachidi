@@ -160,6 +160,8 @@ pub mod pallet {
 		MaxChallengesReached,
 		/// Cannot find the challenge
 		ChallengeNotFound,
+		/// This challenge is already active. Go vote!
+		ChallengeAlreadyExists,
 	}
 
 
@@ -191,14 +193,18 @@ pub mod pallet {
 			target: <T::Lookup as StaticLookup>::Source,
 			confidence: Confidence,
 		) -> DispatchResult {
+
 			// Ensure that confidence is within the valid range 0..10 (inclusive).
 			ensure!(confidence <= 10, Error::<T>::ConfidenceOutOfBounds);
+
 			// Check origin is signed and lookup the target.
 			let origin = ensure_signed(origin)?;
 			let dest = T::Lookup::lookup(target)?;
+
 			// Ensure that origin and dest are not the same account.
 			ensure!(origin.clone() != dest.clone(), Error::<T>::SelfAttestationError);
 			
+			// Retrieve the current block number for later reference
 			let current_block = <frame_system::Pallet<T>>::block_number();
 
 			// Get latest attest count, initialize if empty
@@ -215,19 +221,19 @@ pub mod pallet {
 			
 
 			// Update storage (Attestations and Account Data).
-
-			let (og_count, og_confidence, birth_block) = <AccountData<T>>::get(dest.clone()).unwrap(); // deconstruct latest AccountData for reference
 			
 			if <Attestations<T>>::contains_key(dest.clone(), origin.clone()) { // if attestations contains the key pair already it means we're chanching values of an existing attestation
-
-				let confidence_diff = confidence - <Attestations<T>>::get(dest.clone(), origin.clone()).unwrap().0; // calculate the difference between new and old confidence values to update AccountData
-
 				
+			// Calculate the difference between new and old confidence values to update AccountData
+				let confidence_diff = confidence - <Attestations<T>>::get(dest.clone(), origin.clone()).unwrap().0; 
+
+				// Deconstruct latest AccountData for later reference
+				let (og_count, og_confidence, birth_block) = <AccountData<T>>::get(dest.clone()).unwrap();
 
 				// Update account data.
 				<AccountData<T>>::insert(dest.clone(), (
 					og_count, // do not increment because key pair already exists  
-					og_confidence + confidence_diff as u32, // add the diff
+					og_confidence + u32::from(confidence_diff), // add the diff
 					birth_block)); // leave birth block unchainged 
 
 			} else { // if the key pair doesn't exist yet, this is a new attestation
@@ -235,18 +241,18 @@ pub mod pallet {
 				// Increment the total attest count.	
 				<TotalsCounter<T>>::put((
 					total_attest_count + 1, 
-					sum_confidence + confidence.clone() as u32, 
+					sum_confidence + u32::from(confidence.clone()), 
 				));
 
-				if <AccountData<T>>::contains_key(dest.clone()) { // account 
-
-					let (og_count, og_confidence, birth_block) = <AccountData<T>>::get(dest.clone()).unwrap(); // deconstruct latest AccountData for reference
+				if <AccountData<T>>::contains_key(dest.clone()) { // if target destination in AccountData 
+					// Deconstruct latest AccountData for later reference
+					let (og_count, og_confidence, og_birth_block) = <AccountData<T>>::get(dest.clone()).unwrap(); 
 						
 					// Update account data.
 					<AccountData<T>>::insert(dest.clone(), (
 						og_count + 1, // key pair did not exist so add new attestation to the original count 
 						og_confidence + confidence as u32, // add confidence for new attestation to the original sum
-						birth_block)); // leave birth block because the account is not new
+						og_birth_block)); // leave birth block because the account is not new
 
 				} else { // if the account is new initialize all AccountData
 					<AccountData<T>>::insert(dest.clone(), (1, confidence as u32, current_block))
@@ -274,6 +280,9 @@ pub mod pallet {
 
 			let challenger = ensure_signed(challenger)?;
 			let suspect = T::Lookup::lookup(suspect)?;
+
+			//Check Challenge Already Created
+			ensure!(!<ActiveChallenges<T>>::contains_key(suspect.clone()), Error::<T>::ChallengeAlreadyExists);
 
 			// Check challenger validity
 			ensure!(Self::check_account_validity(challenger.clone()), Error::<T>::InvalidChallenger);
@@ -334,13 +343,16 @@ pub mod pallet {
 				Some(tup) => tup,
 				None => return T::BlockWeights::get().base_block,
 			};
-			while block >= block_number {
+			while block > block_number {
 				// Tally votes
 				let tally = Self::tally(suspect.clone());
 
 				// Enact final judgement 
 				if tally < 0 {
 					<BannedAccounts<T>>::insert(suspect.clone(), block_number);
+					// Maybe remove from account data and remove their attestations
+					// Must consider the reprocussions of destroying data like this first
+					// Todo: Remove Old Votes
 				}
 
 				// Remove from map of active challenges 
@@ -373,22 +385,33 @@ pub mod pallet {
 			// Totals
 			let (tot_attest, tot_conf) = match <TotalsCounter<T>>::try_get() {
 				Ok(tup) => tup,
-				Err(_) => return false,
+				Err(_) => {
+					<TotalsCounter<T>>::put((0, 0));
+					(0, 0)
+				}
 			};
 			let tot_accounts = <AccountData<T>>::count();
 			// Account
 			let (attest_count, conf_sum, _bb) = match <AccountData<T>>::try_get(account.clone()) {
 				Ok(tup) => tup,
-				Err(_) => return false,
+				Err(_) => {
+					let birth_block =  <frame_system::Pallet<T>>::block_number();
+					<AccountData<T>>::insert(account.clone(), (0, 0, birth_block));
+					(0, 0, birth_block)
+				}
 			};
+			
+			// If there are no attestations let the network start
+			if tot_attest == 0 {return true};
 
 			// Avg confidence is at least = network average
 			let avg_conf_network = tot_conf / tot_attest;
-			if conf_sum / attest_count >= avg_conf_network {return false};
+			if attest_count == 0 {return false};
+			if conf_sum / attest_count < avg_conf_network {return false};
 		
 			// # attestations is at least = network average
 			let avg_attest = tot_attest / tot_accounts;
-			if attest_count >= avg_attest {return false};
+			if attest_count < avg_attest {return false};
 
 			// Average birth_block is at least = network average (to be added)
 			//let avg_bb = sum_bb / tot_accounts;
